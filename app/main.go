@@ -116,11 +116,12 @@ func writeInt(conn net.Conn, n int) {
 }
 
 func writeArray(conn net.Conn, items []string) {
-	resp := fmt.Sprintf("*%d\r\n", len(items))
+	var resp strings.Builder
+	fmt.Fprintf(&resp, "*%d\r\n", len(items))
 	for _, items := range items {
-		resp += fmt.Sprintf("$%d\r\n%s\r\n", len(items), items)
+		fmt.Fprintf(&resp, "$%d\r\n%s\r\n", len(items), items)
 	}
-	conn.Write([]byte(resp))
+	conn.Write([]byte(resp.String()))
 }
 
 func writeNullArray(conn net.Conn) {
@@ -152,27 +153,38 @@ func parseRESP(reader *bufio.Reader) ([]string, error) {
 	line = strings.TrimRight(line, "\r\n")
 
 	// must start with * (array)
-	if line[0] != '*' {
-		return nil, fmt.Errorf("expected array, got %q", line)
+	if line == "" || line[0] != '*' {
+		return nil, fmt.Errorf("ERROR: expected array")
 	}
 
 	var count int
-	fmt.Sscanf(line[1:], "%d", &count)
+	if _, err := fmt.Sscanf(line[1:], "%d", &count); err !=  nil {
+		return nil, fmt.Errorf("bad array count %w", err)
+	}
 
 	args := make([]string, 0, count)
 	for i := 0; i < count; i++ {
 		// read $<len>
-		line, err = reader.ReadString('\n')
+		lenLine, err := reader.ReadString('\n')
 		if err != nil {
 			return nil, fmt.Errorf("parseRESP reading length: %w", err)
 		}
-
+		// check if the resp array is bad, i.e has alphabet in place of length
+		lenLine = strings.TrimRight(lenLine, "\r\n")
+		if lenLine == "" || lenLine[0] != '$' {
+			return nil, fmt.Errorf("parseRESP: expected bulk string, got %q", lenLine)
+		}
+		// how many byte of string to read as stated by lenLine e.g $3
+		n, err := strconv.Atoi(lenLine[1:])
+		if err !=  nil {
+			return nil, fmt.Errorf("bad bulk lenght: %w", err)
+		}
 		// read the actual value
-		line, err = reader.ReadString('\n')
-		if err != nil {
+		buff := make([]byte, n + 2) // + 2 to accomodate the extra "\r\n"
+		if _, err :=  io.ReadFull(reader, buff); err != nil {
 			return nil, fmt.Errorf("parseRESP reading value: %w", err)
 		}
-		args = append(args, strings.TrimRight(line, "\r\n"))
+		args = append(args, string(buff[:n]))
 	}
 	return args, nil
 }
@@ -194,6 +206,12 @@ func handleConnection(conn net.Conn, Commands map[string]CommandHandler, s *Serv
 		}
 
 		cmd := strings.ToUpper(args[0])
+		// // respond to "REPLCONF from handshake"
+		// if cmd == "REPLCONF" {
+		// 	writeStr(conn, "OK")
+		// 	continue
+		// }
+
 		// Respond to "PSYNC from handshake"
 		if cmd == "PSYNC" {
 			writeStr(conn, fmt.Sprintf("FULLRESYNC %s %d", s.master_replid, s.master_repl_offset))
@@ -202,36 +220,15 @@ func handleConnection(conn net.Conn, Commands map[string]CommandHandler, s *Serv
 
 			// register this conn as replica
 			s.replicas = append(s.replicas, Replica{conn:conn, offset: 0})
-			for {
-				args, err := parseRESP(reader)
-				if err != nil {
-					// remove this replica from the list
-					for i, r := range s.replicas {
-						if r.conn == conn {
-							s.replicas = append(s.replicas[:i], s.replicas[i+1:]...)
-							break
-						}
-					}
-					return
-				}
-
-				if len(args) > 2 && strings.ToUpper(args[0]) == "REPLCONF" && strings.ToUpper(args[1]) == "ACK" {
-					offset, _ := strconv.Atoi(args[2])
-					for i, r := range s.replicas {
-						if r.conn == conn {
-							s.replicas[i].offset = offset
-							break
-						}
-					}
-				}
-			}
-
-		}
-		if cmd == "REPLCONF" {
-			writeStr(conn, "OK")
 			continue
 		}
-       
+		if cmd == "REPLCONF" {
+			if len(args) > 2 && strings.ToUpper(args[1]) == "ACK" {
+				// TODO: update replica offset, no response
+			}
+				writeStr(conn, "OK")
+				continue
+			}
 		if cmd == "INFO" {
 			s.Info(conn, args[1:]...)
 			continue
@@ -308,8 +305,6 @@ func (s *Server) propagateToReplicas(args []string) {
 	for _, replica := range s.replicas {
 		writeArray(replica.conn, args)
 	}
-	// incremeent offset after every write to replica to track write commands
-	s.master_repl_offset += respSize(args)
 }
 // func to connect replica to master 
 
@@ -818,55 +813,33 @@ func (s *Server) Info(conn net.Conn, args...string) error {
 	return nil
 }
 
-func (s *Server) Wait(conn net.Conn, args ...string) error {
-    if len(args) != 2 {
-        writeErr(conn, "WAIT: command takes two arguments")
-        return nil
-    }
-    noOfReplicaToWaitFor, err := strconv.Atoi(args[0])
-    if err != nil {
-        writeErr(conn, "WAIT: command expected no of replicas to wait for as an integer value")
-        return nil
-    }
-    timeOut, err := strconv.Atoi(args[1])
-    if err != nil {
-        writeErr(conn, "time out has to be an integer value")
-        return nil
-    }
+// func (s *Server) Wait(conn net.Conn, args...string) error {
+// 	if len(args) !=  2 {
+// 		writeErr(conn, "WAIT: commnand takes two arguemnet")
+// 	}
+// 	noOfReplicaToWaitFor, err := strconv.ParseInt(args[0], 10, 64)
+// 	if err != nil {
+// 		writeErr(conn, "WAIT: command expected no of replicas to wait for as an integer value")
+// 		return nil
+// 	}
+// 	timeToWait, err := strconv.ParseInt(args[1], 10, 64) 
+// 	if err !=  nil {
+// 		writeErr(conn, "time out has to be an integer value")
+// 		return nil
+// 	}
+//     timeOut := time.Now().Add(time.Duration(time.Duration(timeToWait) * time.Second))
 
-    if s.master_repl_offset == 0 {
-        writeInt(conn, len(s.replicas))
-        return nil
-    }
+// 	for time.Now().After(timeOut) {
+// 		n := int(noOfReplicaToWaitFor)
+// 		if len(s.replicas) <=  n {
+// 			writeInt(conn, n)
+// 			return nil
+// 		}
+// 	}
 
-    for _, replica := range s.replicas {
-        writeArray(replica.conn, []string{"REPLCONF", "GETACK", "*"})
-    }
 
-    deadLine := time.Now().Add(time.Duration(timeOut) * time.Millisecond)
-    for time.Now().Before(deadLine) {
-        count := 0
-        for _, replica := range s.replicas {
-            if replica.offset >= s.master_repl_offset {
-                count++
-            }
-        }
-        if count >= noOfReplicaToWaitFor {
-            writeInt(conn, count)
-            return nil
-        }
-        time.Sleep(10 * time.Millisecond)
-    }
+	
 
-    // count := 0
-    // for _, replica := range s.replicas {
-    //     if replica.offset >= s.master_repl_offset {
-    //         count++
-    //     }
-    // }
-    // writeInt(conn, count)
-    // return nil
-}
 // ---- main ------
 func main() {
 	// command name to methods
