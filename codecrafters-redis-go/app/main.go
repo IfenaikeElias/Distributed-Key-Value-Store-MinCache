@@ -800,6 +800,38 @@ func (s *Server) Info(conn net.Conn, args...string) error {
 	writeBulkStr(conn, false, string(info.String()))
 	return nil
 }
+
+func (s *Server) Wait(conn net.Conn, args...string) error {
+	if len(args) !=  2 {
+		writeErr(conn, "WAIT: commnand takes two arguemnet")
+	}
+	noOfReplicaToWaitFor, err := strconv.ParseInt(args[0], 10, 64)
+	if err != nil {
+		writeErr(conn, "WAIT: command expected no of replicas to wait for as an integer value")
+		return nil
+	}
+	timeToWait, err := strconv.ParseInt(args[1], 10, 64) 
+	if err !=  nil {
+		writeErr(conn, "time out has to be an integer value")
+		return nil
+	}
+    timeOut := time.Now().Add(time.Duration(time.Duration(timeToWait) * time.Second))
+
+	for time.Now().After(timeOut) {
+		n := int(noOfReplicaToWaitFor)
+		if len(s.replicas) <=  n {
+			writeInt(conn, n)
+			return nil
+		}
+	}
+
+
+	
+
+	// wait for 
+
+	return nil
+}
 // ---- main ------
 func main() {
 	// command name to methods
