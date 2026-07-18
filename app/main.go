@@ -194,11 +194,6 @@ func handleConnection(conn net.Conn, Commands map[string]CommandHandler, s *Serv
 		}
 
 		cmd := strings.ToUpper(args[0])
-		// respond to "REPLCONF from handshake"
-		if cmd == "REPLCONF" {
-			writeStr(conn, "OK")
-			continue
-		}
 		// Respond to "PSYNC from handshake"
 		if cmd == "PSYNC" {
 			writeStr(conn, fmt.Sprintf("FULLRESYNC %s %d", s.master_replid, s.master_repl_offset))
@@ -207,16 +202,36 @@ func handleConnection(conn net.Conn, Commands map[string]CommandHandler, s *Serv
 
 			// register this conn as replica
 			s.replicas = append(s.replicas, Replica{conn:conn, offset: 0})
-			continue
+			for {
+				args, err := parseRESP(reader)
+				if err != nil {
+					// remove this replica from the list
+					for i, r := range s.replicas {
+						if r.conn == conn {
+							s.replicas = append(s.replicas[:i], s.replicas[i+1:]...)
+							break
+						}
+					}
+					return
+				}
+
+				if len(args) > 2 && strings.ToUpper(args[0]) == "REPLCONF" && strings.ToUpper(args[1]) == "ACK" {
+					offset, _ := strconv.Atoi(args[2])
+					for i, r := range s.replicas {
+						if r.conn == conn {
+							s.replicas[i].offset = offset
+							break
+						}
+					}
+				}
+			}
+
 		}
 		if cmd == "REPLCONF" {
-		if len(args) > 2 && strings.ToUpper(args[1]) == "ACK" {
-			// update replica offset, no response
-			continue
-		}
 			writeStr(conn, "OK")
 			continue
 		}
+       
 		if cmd == "INFO" {
 			s.Info(conn, args[1:]...)
 			continue
@@ -293,6 +308,8 @@ func (s *Server) propagateToReplicas(args []string) {
 	for _, replica := range s.replicas {
 		writeArray(replica.conn, args)
 	}
+	// incremeent offset after every write to replica to track write commands
+	s.master_repl_offset += respSize(args)
 }
 // func to connect replica to master 
 
@@ -801,36 +818,54 @@ func (s *Server) Info(conn net.Conn, args...string) error {
 	return nil
 }
 
-func (s *Server) Wait(conn net.Conn, args...string) error {
-	if len(args) !=  2 {
-		writeErr(conn, "WAIT: commnand takes two arguemnet")
-	}
-	noOfReplicaToWaitFor, err := strconv.ParseInt(args[0], 10, 64)
-	if err != nil {
-		writeErr(conn, "WAIT: command expected no of replicas to wait for as an integer value")
-		return nil
-	}
-	timeToWait, err := strconv.ParseInt(args[1], 10, 64) 
-	if err !=  nil {
-		writeErr(conn, "time out has to be an integer value")
-		return nil
-	}
-    timeOut := time.Now().Add(time.Duration(time.Duration(timeToWait) * time.Second))
+func (s *Server) Wait(conn net.Conn, args ...string) error {
+    if len(args) != 2 {
+        writeErr(conn, "WAIT: command takes two arguments")
+        return nil
+    }
+    noOfReplicaToWaitFor, err := strconv.Atoi(args[0])
+    if err != nil {
+        writeErr(conn, "WAIT: command expected no of replicas to wait for as an integer value")
+        return nil
+    }
+    timeOut, err := strconv.Atoi(args[1])
+    if err != nil {
+        writeErr(conn, "time out has to be an integer value")
+        return nil
+    }
 
-	for time.Now().After(timeOut) {
-		n := int(noOfReplicaToWaitFor)
-		if len(s.replicas) <=  n {
-			writeInt(conn, n)
-			return nil
-		}
-	}
+    if s.master_repl_offset == 0 {
+        writeInt(conn, len(s.replicas))
+        return nil
+    }
 
+    for _, replica := range s.replicas {
+        writeArray(replica.conn, []string{"REPLCONF", "GETACK", "*"})
+    }
 
-	
+    deadLine := time.Now().Add(time.Duration(timeOut) * time.Millisecond)
+    for time.Now().Before(deadLine) {
+        count := 0
+        for _, replica := range s.replicas {
+            if replica.offset >= s.master_repl_offset {
+                count++
+            }
+        }
+        if count >= noOfReplicaToWaitFor {
+            writeInt(conn, count)
+            return nil
+        }
+        time.Sleep(10 * time.Millisecond)
+    }
 
-	// wait for 
-
-	return nil
+    // count := 0
+    // for _, replica := range s.replicas {
+    //     if replica.offset >= s.master_repl_offset {
+    //         count++
+    //     }
+    // }
+    // writeInt(conn, count)
+    // return nil
 }
 // ---- main ------
 func main() {
