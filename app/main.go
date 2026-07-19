@@ -36,7 +36,8 @@ type Store struct {
 }
 
 type function struct {
-	functionName CommandHandler
+	name        string
+	functionHandlerName CommandHandler
 	arguements   []string
 }
 
@@ -53,6 +54,7 @@ type Server struct {
 	isMaster 		 	bool
 	replicaOf 			string // host port of master if the server is a replica
 	replicas 			[]Replica // connected replica server can use only if is a master
+	replicasMu 			sync.RWMutex
 	replOffset 			int
 	master_repl_offset  int
 	master_replid 	 	string
@@ -191,6 +193,7 @@ func parseRESP(reader *bufio.Reader) ([]string, error) {
 
 // ------- function to handle connection ------
 func handleConnection(conn net.Conn, Commands map[string]CommandHandler, s *Server) {
+	
 	defer conn.Close()
 	reader := bufio.NewReader(conn)
 	inTransaction := false
@@ -206,6 +209,30 @@ func handleConnection(conn net.Conn, Commands map[string]CommandHandler, s *Serv
 		}
 
 		cmd := strings.ToUpper(args[0])
+		if !s.isMaster && isWriteCommand(cmd) {
+			writeErr(conn, "Replicas are not allowed to write")
+			continue
+		}
+
+
+		if cmd == "REPLCONF" {
+			if len(args) > 2 && strings.ToUpper(args[1]) == "ACK" {
+				if offSet, err := strconv.Atoi(args[2]); err == nil {
+					s.replicasMu.Lock()
+					for i := range s.replicas {
+						if s.replicas[i].conn == conn {
+							s.replicas[i].offset = offSet
+							break
+						}
+					}
+					s.replicasMu.Unlock()
+				}
+				continue
+			}
+				writeStr(conn, "OK")
+				continue
+			}
+		
 		// // respond to "REPLCONF from handshake"
 		// if cmd == "REPLCONF" {
 		// 	writeStr(conn, "OK")
@@ -219,16 +246,12 @@ func handleConnection(conn net.Conn, Commands map[string]CommandHandler, s *Serv
 			writeRDBFile(conn, string(emptyRDB))
 
 			// register this conn as replica
+			s.replicasMu.Lock()
 			s.replicas = append(s.replicas, Replica{conn:conn, offset: 0})
+			s.replicasMu.Unlock()
 			continue
 		}
-		if cmd == "REPLCONF" {
-			if len(args) > 2 && strings.ToUpper(args[1]) == "ACK" {
-				// TODO: update replica offset, no response
-			}
-				writeStr(conn, "OK")
-				continue
-			}
+		
 		if cmd == "INFO" {
 			s.Info(conn, args[1:]...)
 			continue
@@ -261,13 +284,21 @@ func handleConnection(conn net.Conn, Commands map[string]CommandHandler, s *Serv
 				writeArray(conn, []string{})
 				continue
 			}
+			// write transaction to replica
 			conn.Write([]byte(fmt.Sprintf("*%d\r\n", len(transactionQueue))))
 			for _, command := range transactionQueue {
-				command.functionName(conn, command.arguements...)
+				if err := command.functionHandlerName(conn, command.arguements...); err != nil {
+					writeErr(conn, err.Error())
+					continue
+				}
+				if s.isMaster && isWriteCommand(command.name) {
+					s.propagateToReplicas(append([]string{command.name}, command.arguements...))
+				}
 			}
 			transactionQueue = []function{}
 			continue
 		}
+
 		if cmd == "DISCARD" {
 			if len(args[1:]) != 0 {
 				writeErr(conn, "DISCARD: commad takes no arguement")
@@ -282,31 +313,44 @@ func handleConnection(conn net.Conn, Commands map[string]CommandHandler, s *Serv
 			writeStr(conn, "OK")
 			continue
 		}
-
+        
 		handler, ok := Commands[cmd]
 		if !ok {
 			writeErr(conn, "unknown command")
 			continue
 		}
 		if inTransaction {
-			transactionQueue = append(transactionQueue, function{functionName: handler, arguements: args[1:]})
+			transactionQueue = append(
+				transactionQueue, 
+				function{
+					name: cmd, 
+					functionHandlerName: handler, 
+					arguements: args[1:]})
 			writeStr(conn, "QUEUED")
 			continue
 		} else if err := handler(conn, args[1:]...); err != nil {
 			writeErr(conn, err.Error())
 		}
+		// propagate plain command ran outside of transaction (no queueing) to replica
 		if s.isMaster && isWriteCommand(cmd) {
 			s.propagateToReplicas(append([]string{cmd}, args[1:]...))
 		}
 	}
 }
 
+// function ton propagate commands to replicas
 func (s *Server) propagateToReplicas(args []string) {
+	s.replicasMu.Lock()
 	for _, replica := range s.replicas {
 		writeArray(replica.conn, args)
 	}
+	// after propagation of command from master to replica is complete
+	// update the replicaOffset in master i.e maste_repl_offset
+	s.master_repl_offset += respSize(args)
+	s.replicasMu.Unlock()
 }
-// func to connect replica to master 
+
+// function to count how many replica have acknowledge the write they recieved 
 
 func (s *Server) connectToMaster() error {
 	conn, err := net.Dial("tcp", s.replicaOf)
@@ -320,8 +364,7 @@ func (s *Server) connectToMaster() error {
 	reader := bufio.NewReader(conn)
 	response, err := reader.ReadString('\n')
 	if err != nil {
-		writeErr(conn, "stage 1 of Handshake failed")
-		return nil
+		return fmt.Errorf("stage 1 of Handshake failed")
 	}
 
 	if response != "+PONG\r\n" {
@@ -332,19 +375,17 @@ func (s *Server) connectToMaster() error {
 	writeArray(conn, []string{"REPLCONF", "listening-port", s.port})
 	response, err = reader.ReadString('\n')
 	if err != nil {
-		writeErr(conn, "stage 2 of Handshake failed")
-		return nil
+		return fmt.Errorf("stage 2 of Handshake failed")
 	}
 
 	if response != "+OK\r\n" {
         return fmt.Errorf("Expected '+OK\\r\\n' got %q", response)
     }
-
+    // write second REPLCONF (ready to sync data)
 	writeArray(conn, []string{"REPLCONF", "capa", "psync2"})
 	response, err = reader.ReadString('\n')
 	if err != nil {
-		writeErr(conn, "stage 2 of Handshake failed")
-		return nil
+		return fmt.Errorf("stage 2 of Handshake failed")
 	}
 
 	if response != "+OK\r\n" {
@@ -400,7 +441,8 @@ func (s *Server) listenToMaster(reader *bufio.Reader, conn net.Conn) {
         case "INCR":
             s.Incr(nil, args[1:]...)
         case "REPLCONF":
-            if strings.ToUpper(args[1]) == "GETACK" {
+            if len(args) > 1 && strings.ToUpper(args[1]) == "GETACK" {
+				s.replOffset += respSize((args))
                 writeArray(conn, []string{"REPLCONF", "ACK", strconv.Itoa(s.replOffset)})
             }
         }
@@ -680,16 +722,19 @@ func (s *Server) Lpop(conn net.Conn, args ...string) error {
 	return nil
 }
 
-// Blpop function
 func (s *Server) Blpop(conn net.Conn, args ...string) error {
 	if len(args) != 2 {
-		writeErr(conn, "BLPOP: command expects two arguements: list_key timeout")
+		if conn != nil {
+			writeErr(conn, "BLPOP: command expects two arguements: list_key timeout")
+		}
 		return nil
 	}
 	key := args[0]
 	timeoutValue, err := strconv.ParseFloat(args[1], 64)
 	if err != nil || timeoutValue < 0 {
-		writeErr(conn, "BLPOP: timeout must be a positive number")
+		if conn != nil {
+			writeErr(conn, "BLPOP: timeout must be a positive number")
+		}
 		return nil
 	}
 
@@ -708,7 +753,9 @@ func (s *Server) Blpop(conn net.Conn, args ...string) error {
 				continue
 			} else if !entity.isListValue {
 				s.DB.mutexLock.Unlock()
-				writeErr(conn, "BLPOP: command got a non list_key arguement")
+				if conn != nil {
+					writeErr(conn, "BLPOP: command got a non list_key arguement")
+				}
 				return nil
 			}
 			if len(entity.listVal) > 0 {
@@ -716,12 +763,19 @@ func (s *Server) Blpop(conn net.Conn, args ...string) error {
 				entity.listVal = entity.listVal[1:]
 				s.DB.KVStore[key] = entity
 				s.DB.mutexLock.Unlock()
-				writeArray(conn, []string{key, popped})
+				if conn != nil {
+					writeArray(conn, []string{key, popped})
+				}
+				if s.isMaster {
+					s.propagateToReplicas([]string{"LPOP", key})
+				}
 				return nil
 			}
 			s.DB.mutexLock.Unlock()
 		}
-		writeNullArray(conn)
+		if conn != nil {
+			writeNullArray(conn)
+		}
 		return nil
 	}
 
@@ -734,7 +788,9 @@ func (s *Server) Blpop(conn net.Conn, args ...string) error {
 			continue
 		} else if !entity.isListValue {
 			s.DB.mutexLock.Unlock()
-			writeErr(conn, "BLPOP: command got a non list_key arguement")
+			if conn != nil {
+				writeErr(conn, "BLPOP: command got a non list_key arguement")
+			}
 			return nil
 		}
 		if len(entity.listVal) > 0 {
@@ -742,7 +798,12 @@ func (s *Server) Blpop(conn net.Conn, args ...string) error {
 			entity.listVal = entity.listVal[1:]
 			s.DB.KVStore[key] = entity
 			s.DB.mutexLock.Unlock()
-			writeArray(conn, []string{key, popped})
+			if conn != nil {
+				writeArray(conn, []string{key, popped})
+			}
+			if s.isMaster {
+				s.propagateToReplicas([]string{"LPOP", key})
+			}
 			return nil
 		}
 		s.DB.mutexLock.Unlock()
@@ -786,32 +847,76 @@ func (s *Server) Incr(conn net.Conn, args ...string) error {
 }
 
 
-func (s *Server) Info(conn net.Conn, args...string) error {
-	if len(args) != 1 && args[0] == "replication" {
-		writeErr(conn, "INFO: command only takes one arguement")
+func (s *Server) Info(conn net.Conn, args ...string) error {
+	if len(args) > 1 {
+		writeErr(conn, "INFO: command takes at most one argument")
 		return nil
 	}
 	var info strings.Builder
-	info.Grow(128)
-	response := &info
-	if !s.isMaster {
-		// response.WriteString("# Replication\r\n")
-		response.WriteString("role:slave\r\n")
-		// response.WriteString("connected_slaves:0")
-		response.WriteString(fmt.Sprintf("master_replid:%s", s.master_replid))
-		response.WriteString(fmt.Sprintf("master_repl_offset:%d", s.master_repl_offset))
-		// response.WriteString("second_repl_offset:-1")
-		// response.WriteString("repl_backlog_active:0")
-		// response.WriteString("repl_backlog_size:1048576")
-		// response.WriteString("repl_backlog_first_byte_offset:0")
-		// response.WriteString("repl_backlog_histlen:")
-	} else {response.WriteString("role:master")
+	if s.isMaster {
+		info.WriteString("role:master\r\n")
+	} else {
+		info.WriteString("role:slave\r\n")
 	}
-	response.WriteString(fmt.Sprintf("master_replid:%s", s.master_replid))
-	response.WriteString(fmt.Sprintf("master_repl_offset:%d", s.master_repl_offset))
-	writeBulkStr(conn, false, string(info.String()))
+	info.WriteString(fmt.Sprintf("master_replid:%s\r\n", s.master_replid))
+	info.WriteString(fmt.Sprintf("master_repl_offset:%d\r\n", s.master_repl_offset))
+	writeBulkStr(conn, false, info.String())
 	return nil
 }
+
+func (s *Server) Wait(conn net.Conn, args...string) error {
+	if len(args) != 2 {
+		writeErr(conn, "WAIT: command takes two arguements")
+	}
+
+	numReplicasWanted, err := strconv.Atoi(args[0])
+	if err !=  nil {
+		writeErr(conn, "WAIT: first argument must be an integer")
+		return nil
+	}
+
+	timeOut, err := strconv.Atoi(args[1])
+	if err != nil {
+		writeErr(conn, "WAIT: second argument must be an integer")
+		return nil
+	}
+
+	targetOffSet := s.master_repl_offset
+
+	// ask replicas to report their current state
+	s.propagateToReplicas([]string{"REPLCONF", "GETACK", "*"})
+
+	// convert waiting time to millisecond and calculate end of waiting
+	deadline := time.Now().Add(time.Duration(timeOut) * time.Millisecond)
+	for time.Now().Before(deadline) {
+		// count all eligible replicas for wait command
+		count := 0
+		for _, r := range s.replicas { 
+			if r.offset >= targetOffSet {
+				count ++
+			}
+		}
+		if count >= numReplicasWanted {
+			writeInt(conn, count)
+		}
+	} 
+	return nil
+}
+
+// helpers for WAIT command
+/*
+We the master has to see how many replicas has acknowledge the pre
+previous writes. The only way to check this is if the master_repl_offset == replica_offset (for the replicas)
+so we would have to iterate over all replicas and return get/count the replicas 
+that satify this condition.
+
+so we propagate REPLCONF GETACK to all replicas, they reponsod with ACK <offset>
+and we can see which replica has caught up to the recent write (replica_offset == master_repl_offset).
+we count them.
+*/
+
+// func (s *Server) countA
+
 
 // func (s *Server) Wait(conn net.Conn, args...string) error {
 // 	if len(args) !=  2 {
