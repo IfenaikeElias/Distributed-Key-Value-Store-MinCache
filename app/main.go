@@ -898,6 +898,7 @@ func (s *Server) Wait(conn net.Conn, args...string) error {
 		}
 		if count >= numReplicasWanted {
 			writeInt(conn, count)
+			return nil
 		}
 	} 
 	return nil
