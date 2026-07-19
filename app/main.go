@@ -864,13 +864,14 @@ func (s *Server) Info(conn net.Conn, args ...string) error {
 	return nil
 }
 
-func (s *Server) Wait(conn net.Conn, args...string) error {
+func (s *Server) Wait(conn net.Conn, args ...string) error {
 	if len(args) != 2 {
-		writeErr(conn, "WAIT: command takes two arguements")
+		writeErr(conn, "WAIT: command takes two arguments")
+		return nil
 	}
 
 	numReplicasWanted, err := strconv.Atoi(args[0])
-	if err !=  nil {
+	if err != nil {
 		writeErr(conn, "WAIT: first argument must be an integer")
 		return nil
 	}
@@ -883,24 +884,50 @@ func (s *Server) Wait(conn net.Conn, args...string) error {
 
 	targetOffSet := s.master_repl_offset
 
+	// check if already caught up before asking
+	s.replicasMu.RLock()
+	count := 0
+	for _, r := range s.replicas {
+		if r.offset >= targetOffSet {
+			count++
+		}
+	}
+	s.replicasMu.RUnlock()
+	if count >= numReplicasWanted {
+		writeInt(conn, count)
+		return nil
+	}
+
 	// ask replicas to report their current state
 	s.propagateToReplicas([]string{"REPLCONF", "GETACK", "*"})
 
-	// convert waiting time to millisecond and calculate end of waiting
 	deadline := time.Now().Add(time.Duration(timeOut) * time.Millisecond)
 	for time.Now().Before(deadline) {
-		// count all eligible replicas for wait command
+		s.replicasMu.RLock()
 		count := 0
-		for _, r := range s.replicas { 
+		for _, r := range s.replicas {
 			if r.offset >= targetOffSet {
-				count ++
+				count++
 			}
 		}
+		s.replicasMu.RUnlock()
+
 		if count >= numReplicasWanted {
 			writeInt(conn, count)
 			return nil
 		}
-	} 
+	}
+
+	// timed out — report however many caught up in time
+	s.replicasMu.RLock()
+	count = 0
+	for _, r := range s.replicas {
+		if r.offset >= targetOffSet {
+			count++
+		}
+	}
+	s.replicasMu.RUnlock()
+	writeInt(conn, count)
 	return nil
 }
 
