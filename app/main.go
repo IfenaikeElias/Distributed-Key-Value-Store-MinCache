@@ -970,6 +970,7 @@ func main() {
 		"LPOP":   s.Lpop,
 		"BLPOP":  s.Blpop,
 		"INCR":   s.Incr, 
+		"WAIT" : s.Wait,
 	}
 
 	if *replicaFlag != "" {
