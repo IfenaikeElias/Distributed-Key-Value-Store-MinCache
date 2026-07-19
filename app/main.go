@@ -442,8 +442,9 @@ func (s *Server) listenToMaster(reader *bufio.Reader, conn net.Conn) {
             s.Incr(nil, args[1:]...)
         case "REPLCONF":
             if len(args) > 1 && strings.ToUpper(args[1]) == "GETACK" {
+				writeArray(conn, []string{"REPLCONF", "ACK", strconv.Itoa(s.replOffset)})
 				s.replOffset += respSize((args))
-                writeArray(conn, []string{"REPLCONF", "ACK", strconv.Itoa(s.replOffset)})
+                continue
             }
         }
         // increment offset by size of received message
@@ -916,6 +917,7 @@ func (s *Server) Wait(conn net.Conn, args ...string) error {
 			writeInt(conn, count)
 			return nil
 		}
+		time.Sleep(20 * time.Millisecond)
 	}
 
 	// timed out — report however many caught up in time
