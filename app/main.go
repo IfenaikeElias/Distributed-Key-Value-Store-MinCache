@@ -917,7 +917,6 @@ func (s *Server) Wait(conn net.Conn, args ...string) error {
 			writeInt(conn, count)
 			return nil
 		}
-		time.Sleep(20 * time.Millisecond)
 	}
 
 	// timed out — report however many caught up in time
