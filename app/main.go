@@ -233,11 +233,6 @@ func handleConnection(conn net.Conn, Commands map[string]CommandHandler, s *Serv
 				continue
 			}
 		
-		// // respond to "REPLCONF from handshake"
-		// if cmd == "REPLCONF" {
-		// 	writeStr(conn, "OK")
-		// 	continue
-		// }
 
 		// Respond to "PSYNC from handshake"
 		if cmd == "PSYNC" {
@@ -932,7 +927,6 @@ func (s *Server) Wait(conn net.Conn, args ...string) error {
 	return nil
 }
 
-// helpers for WAIT command
 /*
 We the master has to see how many replicas has acknowledge the pre
 previous writes. The only way to check this is if the master_repl_offset == replica_offset (for the replicas)
@@ -944,32 +938,6 @@ and we can see which replica has caught up to the recent write (replica_offset =
 we count them.
 */
 
-// func (s *Server) countA
-
-
-// func (s *Server) Wait(conn net.Conn, args...string) error {
-// 	if len(args) !=  2 {
-// 		writeErr(conn, "WAIT: commnand takes two arguemnet")
-// 	}
-// 	noOfReplicaToWaitFor, err := strconv.ParseInt(args[0], 10, 64)
-// 	if err != nil {
-// 		writeErr(conn, "WAIT: command expected no of replicas to wait for as an integer value")
-// 		return nil
-// 	}
-// 	timeToWait, err := strconv.ParseInt(args[1], 10, 64) 
-// 	if err !=  nil {
-// 		writeErr(conn, "time out has to be an integer value")
-// 		return nil
-// 	}
-//     timeOut := time.Now().Add(time.Duration(time.Duration(timeToWait) * time.Second))
-
-// 	for time.Now().After(timeOut) {
-// 		n := int(noOfReplicaToWaitFor)
-// 		if len(s.replicas) <=  n {
-// 			writeInt(conn, n)
-// 			return nil
-// 		}
-// 	}
 
 
 	
