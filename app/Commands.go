@@ -17,6 +17,16 @@ func isWriteCommand(cmd string) bool {
 	return false
 }
 
+// saveList writes a list back to the store, deleting the key once the list is empty.
+// Caller must hold s.mutexLock.
+func (s *Store) saveList(key string, entity value) {
+	if len(entity.listVal) == 0 {
+		delete(s.KVStore, key)
+		return
+	}
+	s.KVStore[key] = entity
+}
+
 // -------- Functions --------
 
 // PING function
@@ -250,10 +260,16 @@ func (s *Server) Lpop(conn net.Conn, args ...string) error {
 		return fmt.Errorf("LPOP: command got a non key_lest arguement %s", key)
 	}
 
+	if len(entity.listVal) == 0 {
+		s.DB.mutexLock.Unlock()
+		writeBulkStr(conn, true, "")
+		return nil
+	}
+
 	if len(args) == 1 {
 		popped := entity.listVal[0]
 		entity.listVal = entity.listVal[1:]
-		s.DB.KVStore[key] = entity
+		s.DB.saveList(key, entity)
 		s.DB.mutexLock.Unlock()
 		writeBulkStr(conn, false, popped)
 		return nil
@@ -270,7 +286,7 @@ func (s *Server) Lpop(conn net.Conn, args ...string) error {
 	}
 	popped := entity.listVal[:count]
 	entity.listVal = entity.listVal[count:]
-	s.DB.KVStore[key] = entity
+	s.DB.saveList(key, entity)
 	s.DB.mutexLock.Unlock()
 	if len(popped) == 1 {
 		writeBulkStr(conn, false, popped[0])
@@ -319,7 +335,7 @@ func (s *Server) Blpop(conn net.Conn, args ...string) error {
 			if len(entity.listVal) > 0 {
 				popped := entity.listVal[0]
 				entity.listVal = entity.listVal[1:]
-				s.DB.KVStore[key] = entity
+				s.DB.saveList(key, entity)
 				s.DB.mutexLock.Unlock()
 				if conn != nil {
 					writeArray(conn, []string{key, popped})
@@ -354,7 +370,7 @@ func (s *Server) Blpop(conn net.Conn, args ...string) error {
 		if len(entity.listVal) > 0 {
 			popped := entity.listVal[0]
 			entity.listVal = entity.listVal[1:]
-			s.DB.KVStore[key] = entity
+			s.DB.saveList(key, entity)
 			s.DB.mutexLock.Unlock()
 			if conn != nil {
 				writeArray(conn, []string{key, popped})
