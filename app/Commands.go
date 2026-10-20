@@ -408,32 +408,32 @@ func (s *Server) Incr(conn net.Conn, args ...string) error {
 		return nil
 	}
 	key := args[0]
+	// hold the lock across read-modify-write so concurrent INCRs can't overwrite each other
 	s.DB.mutexLock.Lock()
 	entity, ok := s.DB.KVStore[key]
-	s.DB.mutexLock.Unlock()
 	if !ok {
-		s.DB.mutexLock.Lock()
 		s.DB.KVStore[key] = value{strVal: "1"}
 		s.DB.mutexLock.Unlock()
 		writeInt(conn, 1)
 		return nil
 	}
-	if !entity.isListValue {
-		number, err := strconv.Atoi(entity.strVal)
-		if err != nil {
-			writeErr(conn, "value is not an integer or out of range")
-			return nil
-		}
-		strNumber := strconv.Itoa(number + 1)
-		updatedNumber, _ := strconv.Atoi(strNumber)
-		entity.strVal = strNumber
-		s.DB.mutexLock.Lock()
-		s.DB.KVStore[key] = entity
+	if entity.isListValue {
 		s.DB.mutexLock.Unlock()
-		writeInt(conn, updatedNumber)
+		writeErr(conn, "value is not an integer or out of range")
 		return nil
 	}
-	writeErr(conn, "value is not an integer or out of range")
+	number, err := strconv.Atoi(entity.strVal)
+	if err != nil {
+		s.DB.mutexLock.Unlock()
+		writeErr(conn, "value is not an integer or out of range")
+		return nil
+	}
+	number++
+	entity.strVal = strconv.Itoa(number)
+	s.DB.KVStore[key] = entity
+	s.DB.mutexLock.Unlock()
+
+	writeInt(conn, number)
 	return nil
 }
 
