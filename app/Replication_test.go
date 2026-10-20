@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -54,4 +55,49 @@ func TestReplicaAppliesPropagatedLpop(t *testing.T) {
 	feedFromMaster(s, []string{"RPUSH", "k", "a", "b"}, []string{"LPOP", "k"})
 
 	assertEqual(t, call(s.Lrange, "k", "0", "-1"), "*1\r\n$1\r\nb\r\n")
+}
+
+// ---- unit tests for the rest of Replication.go ----
+
+func TestRespSizeMatchesEncodedLength(t *testing.T) {
+	for _, cmd := range [][]string{{"PING"}, {"SET", "key", "value"}, {"REPLCONF", "GETACK", "*"}, {"SET", "k", ""}} {
+		assertEqual(t, respSize(cmd), len(encode(cmd...)))
+	}
+}
+
+func TestGenerateReplicationID(t *testing.T) {
+	id := GenerateReplicationID()
+
+	assertEqual(t, len(id), 40)
+	if strings.Trim(id, "0123456789abcdef") != "" {
+		t.Errorf("id %q is not lowercase hex", id)
+	}
+	if id == GenerateReplicationID() {
+		t.Error("two generated ids are equal")
+	}
+}
+
+func TestPropagateToReplicasSendsToAllAndAdvancesOffset(t *testing.T) {
+	s := newTestServer()
+	first, second := attachReplica(s), attachReplica(s)
+
+	s.propagateToReplicas([]string{"SET", "k", "v"})
+
+	assertEqual(t, first.String(), encode("SET", "k", "v"))
+	assertEqual(t, second.String(), encode("SET", "k", "v"))
+	assertEqual(t, s.master_repl_offset, len(encode("SET", "k", "v")))
+}
+
+func TestReplicaAnswersGetackWithBytesProcessedSoFar(t *testing.T) {
+	s := newTestServer()
+	s.isMaster = false
+
+	masterConn := feedFromMaster(s,
+		[]string{"SET", "k", "v"},
+		[]string{"REPLCONF", "GETACK", "*"},
+	)
+
+	// the offset in the ACK counts everything before the GETACK itself
+	offset := strconv.Itoa(len(encode("SET", "k", "v")))
+	assertEqual(t, masterConn.String(), encode("REPLCONF", "ACK", offset))
 }

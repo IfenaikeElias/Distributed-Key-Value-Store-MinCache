@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strconv"
+	"testing"
+)
 
 // ---- one reply per command (failed commands used to reply twice) ----
 
@@ -95,4 +98,52 @@ func TestBlpopIsWokenByPushInsideExec(t *testing.T) {
 	c.do("EXEC")
 
 	assertEqual(t, receive(t, waiter), "*2\r\n$1\r\nk\r\n$1\r\na\r\n")
+}
+
+// ---- unit tests for the rest of the connection loop ----
+
+func TestCommandNamesAreCaseInsensitive(t *testing.T) {
+	c := connect(t, newTestServer())
+
+	assertEqual(t, c.do("set", "k", "v"), "+OK\r\n")
+	assertEqual(t, c.do("Get", "k"), "$1\r\nv\r\n")
+}
+
+func TestUnknownCommand(t *testing.T) {
+	c := connect(t, newTestServer())
+
+	assertEqual(t, c.do("FLY"), "-ERR unknown command\r\n")
+}
+
+func TestReplicaRejectsClientWrites(t *testing.T) {
+	s := newTestServer()
+	s.isMaster = false
+	c := connect(t, s)
+
+	assertEqual(t, c.do("SET", "k", "v"), "-ERR Replicas are not allowed to write\r\n")
+	assertEqual(t, c.do("GET", "k"), "$-1\r\n")
+}
+
+func TestReplicaHandshakeAndAckCountedByWait(t *testing.T) {
+	s := newTestServer()
+	s.master_replid = "abc"
+	c := connect(t, s)
+
+	assertEqual(t, c.do("REPLCONF", "listening-port", "6380"), "+OK\r\n")
+	assertEqual(t, c.do("PSYNC", "?", "-1"), "+FULLRESYNC abc 0\r\n")
+	// the RDB snapshot follows as "$<len>\r\n<bytes>" with no trailing CRLF
+	header, _ := c.reader.ReadString('\n')
+	size, _ := strconv.Atoi(header[1 : len(header)-2])
+	c.reader.Discard(size)
+
+	// pretend 100 bytes of writes went out; propagating for real would block on the unread pipe
+	s.replicasMu.Lock()
+	s.master_repl_offset = 100
+	s.replicasMu.Unlock()
+
+	writeArray(c.conn, []string{"REPLCONF", "ACK", "100"}) // ACK gets no reply
+	c.do("PING")                                           // ACK has been processed once this answers
+
+	// the replica has caught up, so WAIT returns straight away without sending GETACK
+	assertEqual(t, call(s.Wait, "1", "100"), ":1\r\n")
 }
