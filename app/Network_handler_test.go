@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bufio"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -146,4 +148,21 @@ func TestReplicaHandshakeAndAckCountedByWait(t *testing.T) {
 
 	// the replica has caught up, so WAIT returns straight away without sending GETACK
 	assertEqual(t, call(s.Wait, "1", "100"), ":1\r\n")
+}
+
+// ---- LPUSH with several elements must replicate in the same order ----
+
+func TestMultiElementLpushReplicatesInOrder(t *testing.T) {
+	master := newTestServer()
+	replicaConn := attachReplica(master)
+	c := connect(t, master)
+
+	c.do("LPUSH", "l", "a", "b", "c")
+	c.do("PING") // propagation has finished once this answers
+
+	replica := newTestServer()
+	replica.isMaster = false
+	replica.listenToMaster(bufio.NewReader(strings.NewReader(replicaConn.String())), &fakeConn{})
+
+	assertEqual(t, call(replica.Lrange, "l", "0", "-1"), call(master.Lrange, "l", "0", "-1"))
 }

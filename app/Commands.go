@@ -216,7 +216,8 @@ func (s *Server) Lpush(conn net.Conn, args ...string) error {
 		return fmt.Errorf("LPUSH: LPUSH recieved less than 2 arguements but expected: list_key, elements_to_push")
 	}
 	key := args[0]
-	elements := args[1:]
+	// reverse a copy: args is also what gets propagated to replicas
+	elements := slices.Clone(args[1:])
 	slices.Reverse(elements)
 	s.DB.mutexLock.Lock()
 	entity, ok := s.DB.KVStore[key]
