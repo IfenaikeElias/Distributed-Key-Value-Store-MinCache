@@ -34,8 +34,10 @@ type function struct {
 
 // struct replica
 type Replica struct {
-	conn net.Conn
+	conn   net.Conn
 	offset int
+	// writes waiting to be sent, in the order the master applied them; drained by sendLoop
+	queue chan []string
 }
 // struct for server
 type Server struct {
@@ -44,7 +46,7 @@ type Server struct {
 	DB               	*Store
 	isMaster 		 	bool
 	replicaOf 			string // host port of master if the server is a replica
-	replicas 			[]Replica // connected replica server can use only if is a master
+	replicas 			[]*Replica // connected replica server can use only if is a master
 	replicasMu 			sync.RWMutex
 	replOffset 			int
 	master_repl_offset  int

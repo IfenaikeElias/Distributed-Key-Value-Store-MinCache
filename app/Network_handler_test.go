@@ -1,9 +1,7 @@
 package main
 
 import (
-	"bufio"
 	"strconv"
-	"strings"
 	"testing"
 )
 
@@ -52,7 +50,7 @@ func TestFailedWritesAreNotPropagated(t *testing.T) {
 	c.do("SET", "k")         // missing value
 	c.do("LPOP", "l", "abc") // bad count
 	c.do("INCR", "n")
-	c.do("PING") // replies come before propagation; once PING answers, INCR n has been propagated
+	waitForReplicaToCatchUp(t, s, replica)
 
 	assertEqual(t, replica.String(), encode("SET", "s", "abc")+encode("RPUSH", "l", "a")+encode("INCR", "n"))
 	assertEqual(t, s.replicationOffset(), len(replica.String()))
@@ -68,7 +66,7 @@ func TestFailedWritesInExecAreNotPropagated(t *testing.T) {
 	c.do("INCR", "s") // not an integer
 	c.do("INCR", "n")
 	c.do("EXEC")
-	c.do("PING")
+	waitForReplicaToCatchUp(t, s, replica)
 
 	assertEqual(t, replica.String(), encode("SET", "s", "abc")+encode("INCR", "n"))
 }
@@ -83,9 +81,9 @@ func TestBlpopServedByPushIsPropagatedAfterThePush(t *testing.T) {
 	c := connect(t, s)
 
 	assertEqual(t, c.do("RPUSH", "k", "a", "b"), ":2\r\n")
-	c.do("PING") // the loop has finished serving and propagating the RPUSH
 
 	assertEqual(t, receive(t, waiter), "*2\r\n$1\r\nk\r\n$1\r\na\r\n")
+	waitForReplicaToCatchUp(t, s, replica)
 	assertEqual(t, replica.String(), encode("RPUSH", "k", "a", "b")+encode("LPOP", "k"))
 }
 
@@ -158,11 +156,8 @@ func TestMultiElementLpushReplicatesInOrder(t *testing.T) {
 	c := connect(t, master)
 
 	c.do("LPUSH", "l", "a", "b", "c")
-	c.do("PING") // propagation has finished once this answers
+	waitForReplicaToCatchUp(t, master, replicaConn)
 
-	replica := newTestServer()
-	replica.isMaster = false
-	replica.listenToMaster(bufio.NewReader(strings.NewReader(replicaConn.String())), &fakeConn{})
-
+	replica := replay(replicaConn.String())
 	assertEqual(t, call(replica.Lrange, "l", "0", "-1"), call(master.Lrange, "l", "0", "-1"))
 }

@@ -49,12 +49,17 @@ func writeArray(conn net.Conn, items []string) {
 	if conn == nil {
 		return
 	}
+	conn.Write(encodeArray(items))
+}
+
+// encodeArray returns items as a RESP array of bulk strings.
+func encodeArray(items []string) []byte {
 	var resp strings.Builder
 	fmt.Fprintf(&resp, "*%d\r\n", len(items))
 	for _, items := range items {
 		fmt.Fprintf(&resp, "$%d\r\n%s\r\n", len(items), items)
 	}
-	conn.Write([]byte(resp.String()))
+	return []byte(resp.String())
 }
 
 func writeNullArray(conn net.Conn) {

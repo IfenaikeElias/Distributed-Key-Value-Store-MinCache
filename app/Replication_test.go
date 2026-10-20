@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // feedFromMaster runs the replica's apply loop over the given commands, as if the master sent them.
@@ -85,6 +86,8 @@ func TestPropagateToReplicasSendsToAllAndAdvancesOffset(t *testing.T) {
 	first, second := attachReplica(s), attachReplica(s)
 
 	s.propagateToReplicas([]string{"SET", "k", "v"})
+	waitForReplicaToCatchUp(t, s, first)
+	waitForReplicaToCatchUp(t, s, second)
 
 	assertEqual(t, first.String(), encode("SET", "k", "v"))
 	assertEqual(t, second.String(), encode("SET", "k", "v"))
@@ -211,4 +214,78 @@ func TestConnectToMasterReportsHandshakeFailures(t *testing.T) {
 			assertErrorContains(t, s.connectToMaster(), tt.want)
 		})
 	}
+}
+
+// ---- replicas must apply writes in the order the master applied them ----
+
+func TestConcurrentWritesReplicateInOrder(t *testing.T) {
+	master := newTestServer()
+	replicaConn := attachReplica(master)
+
+	var wg sync.WaitGroup
+	for w := range 20 {
+		wg.Go(func() {
+			for i := range 200 {
+				value := strconv.Itoa(w) + "-" + strconv.Itoa(i)
+				master.Rpush(nil, "l", value)
+				master.Set(nil, "k", value)
+			}
+		})
+	}
+	wg.Wait()
+	waitForReplicaToCatchUp(t, master, replicaConn)
+
+	replica := replay(replicaConn.String())
+	assertEqual(t, call(replica.Lrange, "l", "0", "-1"), call(master.Lrange, "l", "0", "-1"))
+	assertEqual(t, call(replica.Get, "k"), call(master.Get, "k"))
+}
+
+// stuckConn is a replica connection whose writes hang until it is closed, like a replica that stopped reading.
+type stuckConn struct {
+	fakeConn
+	closeOnce sync.Once
+	closed    chan struct{}
+}
+
+func (c *stuckConn) Write(p []byte) (int, error) {
+	<-c.closed
+	return 0, net.ErrClosed
+}
+
+func (c *stuckConn) Close() error {
+	c.closeOnce.Do(func() { close(c.closed) })
+	return nil
+}
+
+func TestStuckReplicaIsDroppedWithoutBlockingWrites(t *testing.T) {
+	s := newTestServer()
+	stuck := &stuckConn{closed: make(chan struct{})}
+	s.addReplica(stuck)
+	healthy := attachReplica(s)
+
+	// more writes than the stuck replica's queue (plus its sendLoop's write buffer) can hold;
+	// none of them may block
+	done := make(chan struct{})
+	go func() {
+		for range 2 * replicaQueueSize {
+			s.propagateToReplicas([]string{"SET", "k", "v"})
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("writes blocked on a stuck replica")
+	}
+
+	s.replicasMu.RLock()
+	remaining := len(s.replicas)
+	s.replicasMu.RUnlock()
+	assertEqual(t, remaining, 1) // only the healthy one is left
+	select {
+	case <-stuck.closed:
+	default:
+		t.Error("stuck replica's connection was not closed")
+	}
+	waitForReplicaToCatchUp(t, s, healthy)
 }

@@ -58,10 +58,8 @@ func handleConnection(conn net.Conn, Commands map[string]CommandHandler, s *Serv
 			emptyRDB, _ := hex.DecodeString("524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2")
 			writeRDBFile(conn, string(emptyRDB))
 
-			// register this conn as replica
-			s.replicasMu.Lock()
-			s.replicas = append(s.replicas, Replica{conn:conn, offset: 0})
-			s.replicasMu.Unlock()
+			// register this conn as replica; from here on only its sendLoop writes to it
+			s.addReplica(conn)
 			continue
 		}
 		
@@ -100,14 +98,10 @@ func handleConnection(conn net.Conn, Commands map[string]CommandHandler, s *Serv
 		} else if err := handler(conn, args[1:]...); err != nil {
 			// handlers write their own error reply to the client; this is for server logs only
 			fmt.Println("Command failed:", err)
-			// failed writes must not reach replicas
 			continue
 		}
-		// propagate plain command ran outside of transaction (no queueing) to replica
-		if s.isMaster && isWriteCommand(cmd) {
-			s.propagateToReplicas(append([]string{cmd}, args[1:]...))
-		}
-		// wake BLPOP clients only after the push itself has been propagated
+		// write handlers queue themselves for replicas while holding the store lock;
+		// a successful push may now be able to serve blocked BLPOP clients
 		if cmd == "RPUSH" || cmd == "LPUSH" {
 			s.serveBlockedClients(args[1])
 		}

@@ -6,17 +6,26 @@ import (
 	"io"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 )
 
 // fakeConn is a net.Conn that records everything written to it.
-// Only Write is implemented; calling any other net.Conn method panics.
+// Only Write and Close are implemented; calling any other net.Conn method panics.
 type fakeConn struct {
 	net.Conn
-	mu  sync.Mutex
-	buf bytes.Buffer
+	mu     sync.Mutex
+	buf    bytes.Buffer
+	closed bool
+}
+
+func (c *fakeConn) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.closed = true
+	return nil
 }
 
 func (c *fakeConn) Write(p []byte) (int, error) {
@@ -121,7 +130,7 @@ func (c *testClient) read() string {
 // attachReplica registers a fake replica on s and returns it, so tests can see what was propagated.
 func attachReplica(s *Server) *fakeConn {
 	replica := &fakeConn{}
-	s.replicas = append(s.replicas, Replica{conn: replica})
+	s.addReplica(replica)
 	return replica
 }
 
@@ -158,4 +167,24 @@ func receive(t *testing.T, reply <-chan string) string {
 		t.Fatal("timed out waiting for reply")
 		return ""
 	}
+}
+
+// waitForReplicaToCatchUp blocks until replica has received every byte the master has propagated.
+func waitForReplicaToCatchUp(t *testing.T, s *Server, replica *fakeConn) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for len(replica.String()) != s.replicationOffset() {
+		if time.Now().After(deadline) {
+			t.Fatalf("replica received %d bytes, master propagated %d", len(replica.String()), s.replicationOffset())
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// replay applies everything a replica received to a fresh replica server, as a real replica would.
+func replay(received string) *Server {
+	replica := newTestServer()
+	replica.isMaster = false
+	replica.listenToMaster(bufio.NewReader(strings.NewReader(received)), &fakeConn{})
+	return replica
 }

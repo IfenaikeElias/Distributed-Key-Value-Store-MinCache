@@ -96,6 +96,7 @@ func (s *Server) Set(conn net.Conn, args ...string) error {
 
 	s.DB.mutexLock.Lock()
 	s.DB.KVStore[key] = entry
+	s.propagateToReplicas(append([]string{"SET"}, args...))
 	s.DB.mutexLock.Unlock()
 	writeStr(conn, "OK")
 	return nil
@@ -150,6 +151,7 @@ func (s *Server) Rpush(conn net.Conn, args ...string) error {
 	}
 	entry.listVal = append(entry.listVal, elements...)
 	s.DB.KVStore[key] = entry
+	s.propagateToReplicas(append([]string{"RPUSH"}, args...))
 	s.DB.mutexLock.Unlock()
 	
 	writeInt(conn, len(entry.listVal))
@@ -232,6 +234,7 @@ func (s *Server) Lpush(conn net.Conn, args ...string) error {
 	}
 	entity.listVal = append(elements, entity.listVal...)
 	s.DB.KVStore[key] = entity
+	s.propagateToReplicas(append([]string{"LPUSH"}, args...))
 	s.DB.mutexLock.Unlock()
 	
 	writeInt(conn, len(entity.listVal))
@@ -288,6 +291,7 @@ func (s *Server) Lpop(conn net.Conn, args ...string) error {
 		popped := entity.listVal[0]
 		entity.listVal = entity.listVal[1:]
 		s.DB.saveList(key, entity)
+		s.propagateToReplicas([]string{"LPOP", key})
 		s.DB.mutexLock.Unlock()
 		writeBulkStr(conn, false, popped)
 		return nil
@@ -305,6 +309,9 @@ func (s *Server) Lpop(conn net.Conn, args ...string) error {
 	popped := entity.listVal[:count]
 	entity.listVal = entity.listVal[count:]
 	s.DB.saveList(key, entity)
+	if count > 0 {
+		s.propagateToReplicas([]string{"LPOP", key, strconv.Itoa(count)})
+	}
 	s.DB.mutexLock.Unlock()
 	if len(popped) == 1 {
 		writeBulkStr(conn, false, popped[0])
@@ -338,11 +345,9 @@ func (s *Server) Blpop(conn net.Conn, args ...string) error {
 		popped := entity.listVal[0]
 		entity.listVal = entity.listVal[1:]
 		s.DB.saveList(key, entity)
+		s.propagateToReplicas([]string{"LPOP", key})
 		s.DB.mutexLock.Unlock()
 		writeArray(conn, []string{key, popped})
-		if s.isMaster {
-			s.propagateToReplicas([]string{"LPOP", key})
-		}
 		return nil
 	}
 	// slow path: join the queue for this key and sleep until a push hands us an element.
@@ -394,8 +399,8 @@ func (s *Store) removeWaiter(key string, ch chan string) bool {
 }
 
 // serveBlockedClients hands elements of key's list to clients blocked in BLPOP,
-// longest-waiting first. Called after a push has been applied and propagated,
-// so replicas receive the push before the LPOPs it feeds.
+// longest-waiting first. Called after a push has been applied (and queued for
+// replicas), so replicas receive the push before the LPOPs it feeds.
 func (s *Server) serveBlockedClients(key string) {
 	s.DB.mutexLock.Lock()
 	entity, ok := s.DB.KVStore[key]
@@ -405,18 +410,13 @@ func (s *Server) serveBlockedClients(key string) {
 		s.DB.removeWaiter(key, ch)
 		ch <- entity.listVal[0]
 		entity.listVal = entity.listVal[1:]
+		s.propagateToReplicas([]string{"LPOP", key})
 		served++
 	}
 	if served > 0 {
 		s.DB.saveList(key, entity)
 	}
 	s.DB.mutexLock.Unlock()
-
-	if s.isMaster {
-		for range served {
-			s.propagateToReplicas([]string{"LPOP", key})
-		}
-	}
 }
 
 // Incr function
@@ -431,6 +431,7 @@ func (s *Server) Incr(conn net.Conn, args ...string) error {
 	entity, ok := s.DB.KVStore[key]
 	if !ok {
 		s.DB.KVStore[key] = value{strVal: "1"}
+		s.propagateToReplicas([]string{"INCR", key})
 		s.DB.mutexLock.Unlock()
 		writeInt(conn, 1)
 		return nil
@@ -449,6 +450,7 @@ func (s *Server) Incr(conn net.Conn, args ...string) error {
 	number++
 	entity.strVal = strconv.Itoa(number)
 	s.DB.KVStore[key] = entity
+	s.propagateToReplicas([]string{"INCR", key})
 	s.DB.mutexLock.Unlock()
 
 	writeInt(conn, number)

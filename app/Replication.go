@@ -11,16 +11,57 @@ import (
 	"strings"
 )
 
-// function ton propagate commands to replicas
-func (s *Server) propagateToReplicas(args []string) {
+// replicaQueueSize is how many writes a replica may fall behind before it is dropped.
+const replicaQueueSize = 10000
+
+// addReplica registers conn as a replica and starts the goroutine that sends it writes.
+func (s *Server) addReplica(conn net.Conn) {
+	replica := &Replica{conn: conn, queue: make(chan []string, replicaQueueSize)}
 	s.replicasMu.Lock()
-	for _, replica := range s.replicas {
-		writeArray(replica.conn, args)
-	}
-	// after propagation of command from master to replica is complete
-	// update the replicaOffset in master i.e maste_repl_offset
-	s.master_repl_offset += respSize(args)
+	s.replicas = append(s.replicas, replica)
 	s.replicasMu.Unlock()
+	go replica.sendLoop()
+}
+
+// sendLoop writes queued commands to the replica, in order, until its queue is closed.
+// It is the only goroutine writing to the replica's connection after the handshake.
+func (r *Replica) sendLoop() {
+	// batch: buffer commands while more are already queued, and hit the network once the
+	// queue is empty. One write per command can't keep up with a pipelined master.
+	w := bufio.NewWriterSize(r.conn, 64*1024)
+	for args := range r.queue {
+		w.Write(encodeArray(args))
+		if len(r.queue) == 0 {
+			w.Flush()
+		}
+	}
+	w.Flush()
+}
+
+// propagateToReplicas queues a write for every replica; the network writes happen in each
+// replica's sendLoop. Commands that change the store must call this while still holding
+// s.DB.mutexLock, so replicas receive writes in exactly the order the master applied them.
+func (s *Server) propagateToReplicas(args []string) {
+	if !s.isMaster {
+		return
+	}
+	s.replicasMu.Lock()
+	defer s.replicasMu.Unlock()
+	kept := s.replicas[:0]
+	for _, replica := range s.replicas {
+		select {
+		case replica.queue <- args:
+			kept = append(kept, replica)
+		default:
+			// never block here: we may be holding the store lock, which would stall every client.
+			// a replica this far behind is dropped instead (Redis does the same)
+			fmt.Println("Dropping replica: send queue full")
+			close(replica.queue)
+			replica.conn.Close()
+		}
+	}
+	s.replicas = kept
+	s.master_repl_offset += respSize(args)
 }
 
 // replicationOffset reads master_repl_offset under replicasMu, the lock
