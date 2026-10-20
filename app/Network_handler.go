@@ -100,6 +100,8 @@ func handleConnection(conn net.Conn, Commands map[string]CommandHandler, s *Serv
 		} else if err := handler(conn, args[1:]...); err != nil {
 			// handlers write their own error reply to the client; this is for server logs only
 			fmt.Println("Command failed:", err)
+			// failed writes must not reach replicas
+			continue
 		}
 		// propagate plain command ran outside of transaction (no queueing) to replica
 		if s.isMaster && isWriteCommand(cmd) {

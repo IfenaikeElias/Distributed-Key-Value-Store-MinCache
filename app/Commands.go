@@ -296,7 +296,7 @@ func (s *Server) Lpop(conn net.Conn, args ...string) error {
 	if err != nil || count < 0 {
 		s.DB.mutexLock.Unlock()
 		writeErr(conn, "LPOP: count must be a positive integer")
-		return nil
+		return fmt.Errorf("LPOP: invalid count %q", args[1])
 	}
 	if count > len(entity.listVal) {
 		count = len(entity.listVal)
@@ -405,7 +405,7 @@ func (s *Server) Blpop(conn net.Conn, args ...string) error {
 func (s *Server) Incr(conn net.Conn, args ...string) error {
 	if len(args) != 1 {
 		writeErr(conn, "INCR: command expects one arguement")
-		return nil
+		return fmt.Errorf("INCR: expected 1 arguement, got %d", len(args))
 	}
 	key := args[0]
 	// hold the lock across read-modify-write so concurrent INCRs can't overwrite each other
@@ -420,13 +420,13 @@ func (s *Server) Incr(conn net.Conn, args ...string) error {
 	if entity.isListValue {
 		s.DB.mutexLock.Unlock()
 		writeErr(conn, "value is not an integer or out of range")
-		return nil
+		return fmt.Errorf("INCR: value at key %s is not an integer", key)
 	}
 	number, err := strconv.Atoi(entity.strVal)
 	if err != nil {
 		s.DB.mutexLock.Unlock()
 		writeErr(conn, "value is not an integer or out of range")
-		return nil
+		return fmt.Errorf("INCR: value at key %s is not an integer", key)
 	}
 	number++
 	entity.strVal = strconv.Itoa(number)

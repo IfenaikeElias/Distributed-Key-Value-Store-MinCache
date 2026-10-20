@@ -31,3 +31,39 @@ func TestExecWithFailingCommandMatchesArrayHeader(t *testing.T) {
 			"+OK\r\n")
 	assertEqual(t, c.do("PING"), "+PONG\r\n")
 }
+
+// ---- failed writes must not be propagated to replicas ----
+
+func TestFailedWritesAreNotPropagated(t *testing.T) {
+	s := newTestServer()
+	replica := attachReplica(s)
+	c := connect(t, s)
+
+	c.do("SET", "s", "abc")
+	c.do("RPUSH", "l", "a")
+	c.do("INCR", "s")        // not an integer
+	c.do("RPUSH", "s", "x")  // not a list
+	c.do("LPUSH", "s", "x")  // not a list
+	c.do("SET", "k")         // missing value
+	c.do("LPOP", "l", "abc") // bad count
+	c.do("INCR", "n")
+	c.do("PING") // replies come before propagation; once PING answers, INCR n has been propagated
+
+	assertEqual(t, replica.String(), encode("SET", "s", "abc")+encode("RPUSH", "l", "a")+encode("INCR", "n"))
+	assertEqual(t, replOffset(s), len(replica.String()))
+}
+
+func TestFailedWritesInExecAreNotPropagated(t *testing.T) {
+	s := newTestServer()
+	replica := attachReplica(s)
+	c := connect(t, s)
+
+	c.do("SET", "s", "abc")
+	c.do("MULTI")
+	c.do("INCR", "s") // not an integer
+	c.do("INCR", "n")
+	c.do("EXEC")
+	c.do("PING")
+
+	assertEqual(t, replica.String(), encode("SET", "s", "abc")+encode("INCR", "n"))
+}

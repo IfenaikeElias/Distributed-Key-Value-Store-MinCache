@@ -117,3 +117,17 @@ func (c *testClient) read() string {
 	}
 	return line
 }
+
+// attachReplica registers a fake replica on s and returns it, so tests can see what was propagated.
+func attachReplica(s *Server) *fakeConn {
+	replica := &fakeConn{}
+	s.replicas = append(s.replicas, Replica{conn: replica})
+	return replica
+}
+
+// replOffset reads the master's replication offset under its lock.
+func replOffset(s *Server) int {
+	s.replicasMu.RLock()
+	defer s.replicasMu.RUnlock()
+	return s.master_repl_offset
+}
