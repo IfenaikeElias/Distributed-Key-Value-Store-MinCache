@@ -98,7 +98,8 @@ func handleConnection(conn net.Conn, Commands map[string]CommandHandler, s *Serv
 			writeStr(conn, "QUEUED")
 			continue
 		} else if err := handler(conn, args[1:]...); err != nil {
-			writeErr(conn, err.Error())
+			// handlers write their own error reply to the client; this is for server logs only
+			fmt.Println("Command failed:", err)
 		}
 		// propagate plain command ran outside of transaction (no queueing) to replica
 		if s.isMaster && isWriteCommand(cmd) {

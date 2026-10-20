@@ -27,11 +27,30 @@ func (s *Store) saveList(key string, entity value) {
 	s.KVStore[key] = entity
 }
 
+// commandTable maps command names to their handlers on this server.
+func (s *Server) commandTable() map[string]CommandHandler {
+	return map[string]CommandHandler{
+		"PING":   Ping,
+		"ECHO":   Echo,
+		"SET":    s.Set,
+		"GET":    s.Get,
+		"RPUSH":  s.Rpush,
+		"LRANGE": s.Lrange,
+		"LPUSH":  s.Lpush,
+		"LLEN":   s.Llen,
+		"LPOP":   s.Lpop,
+		"BLPOP":  s.Blpop,
+		"INCR":   s.Incr,
+		"WAIT":   s.Wait,
+	}
+}
+
 // -------- Functions --------
 
 // PING function
 func Ping(conn net.Conn, args ...string) error {
 	if len(args) > 0 {
+		writeErr(conn, "Ping takes no arguement")
 		return fmt.Errorf("Ping takes no arguement")
 	}
 	writeStr(conn, "PONG")

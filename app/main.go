@@ -19,20 +19,7 @@ func main() {
 		
 	}
 
-	Commands := map[string]CommandHandler{
-		"PING":   Ping,
-		"ECHO":   Echo,
-		"SET":    s.Set,
-		"GET":    s.Get,
-		"RPUSH":  s.Rpush,
-		"LRANGE": s.Lrange,
-		"LPUSH":  s.Lpush,
-		"LLEN":   s.Llen,
-		"LPOP":   s.Lpop,
-		"BLPOP":  s.Blpop,
-		"INCR":   s.Incr, 
-		"WAIT" : s.Wait,
-	}
+	Commands := s.commandTable()
 
 	if *replicaFlag != "" {
     s.isMaster = false

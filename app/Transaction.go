@@ -41,7 +41,8 @@ func handleExec(s *Server, conn net.Conn, args []string, inTransaction *bool, tr
 	conn.Write([]byte(fmt.Sprintf("*%d\r\n", len(*transactionQueue))))
 	for _, command := range *transactionQueue {
 		if err := command.functionHandlerName(conn, command.arguements...); err != nil {
-			writeErr(conn, err.Error())
+			// handler already wrote the error reply into the EXEC array
+			fmt.Println("Command failed in EXEC:", err)
 			continue
 		}
 		if s.isMaster && isWriteCommand(command.name) {

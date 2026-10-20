@@ -1,10 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
+	"io"
 	"net"
+	"strconv"
 	"sync"
 	"testing"
+	"time"
 )
 
 // fakeConn is a net.Conn that records everything written to it.
@@ -63,4 +67,53 @@ func encode(args ...string) string {
 	conn := &fakeConn{}
 	writeArray(conn, args)
 	return conn.String()
+}
+
+// testClient is a client connected to s through handleConnection, the same loop real clients go through.
+type testClient struct {
+	t      *testing.T
+	conn   net.Conn
+	reader *bufio.Reader
+}
+
+func connect(t *testing.T, s *Server) *testClient {
+	t.Helper()
+	clientSide, serverSide := net.Pipe()
+	go handleConnection(serverSide, s.commandTable(), s)
+	clientSide.SetDeadline(time.Now().Add(2 * time.Second)) // fail instead of hanging forever
+	t.Cleanup(func() { clientSide.Close() })
+	return &testClient{t: t, conn: clientSide, reader: bufio.NewReader(clientSide)}
+}
+
+// do sends one command and returns its raw RESP reply.
+func (c *testClient) do(args ...string) string {
+	c.t.Helper()
+	writeArray(c.conn, args)
+	return c.read()
+}
+
+// read returns exactly one RESP reply (arrays include all their elements).
+func (c *testClient) read() string {
+	c.t.Helper()
+	line, err := c.reader.ReadString('\n')
+	if err != nil {
+		c.t.Fatalf("reading reply: %v", err)
+	}
+	n, _ := strconv.Atoi(line[1 : len(line)-2])
+	switch line[0] {
+	case '$':
+		if n < 0 {
+			return line
+		}
+		data := make([]byte, n+2)
+		if _, err := io.ReadFull(c.reader, data); err != nil {
+			c.t.Fatalf("reading bulk string: %v", err)
+		}
+		return line + string(data)
+	case '*':
+		for range max(n, 0) {
+			line += c.read()
+		}
+	}
+	return line
 }
