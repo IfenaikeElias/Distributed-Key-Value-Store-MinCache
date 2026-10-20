@@ -78,9 +78,7 @@ func (s *Server) Set(conn net.Conn, args ...string) error {
 	s.DB.mutexLock.Lock()
 	s.DB.KVStore[key] = entry
 	s.DB.mutexLock.Unlock()
-	if s.isMaster {
-		writeStr(conn, "OK")
-	}
+	writeStr(conn, "OK")
 	return nil
 }
 

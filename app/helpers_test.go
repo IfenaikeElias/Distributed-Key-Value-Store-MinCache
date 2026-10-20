@@ -57,3 +57,10 @@ func keyExists(s *Server, key string) bool {
 	_, ok := s.DB.KVStore[key]
 	return ok
 }
+
+// encode builds the RESP array a client (or master) would send for a command.
+func encode(args ...string) string {
+	conn := &fakeConn{}
+	writeArray(conn, args)
+	return conn.String()
+}

@@ -12,15 +12,24 @@ import (
 //  ---- utils for writing RESP responses -----
 
 func writeStr(conn net.Conn, s string) {
+	if conn == nil {
+		return
+	}
 	resp := "+" + s + CRLF
 	conn.Write([]byte(resp))
 }
 
 func writeErr(conn net.Conn, msg string) {
+	if conn == nil {
+		return
+	}
 	conn.Write([]byte("-ERR " + msg + CRLF))
 }
 
 func writeBulkStr(conn net.Conn, isNull bool, s string) {
+	if conn == nil {
+		return
+	}
 	if isNull {
 		conn.Write([]byte("$-1" + CRLF))
 	} else {
@@ -30,10 +39,16 @@ func writeBulkStr(conn net.Conn, isNull bool, s string) {
 }
 
 func writeInt(conn net.Conn, n int) {
+	if conn == nil {
+		return
+	}
 	conn.Write([]byte(fmt.Sprintf(":%d\r\n", n)))
 }
 
 func writeArray(conn net.Conn, items []string) {
+	if conn == nil {
+		return
+	}
 	var resp strings.Builder
 	fmt.Fprintf(&resp, "*%d\r\n", len(items))
 	for _, items := range items {
@@ -43,6 +58,9 @@ func writeArray(conn net.Conn, items []string) {
 }
 
 func writeNullArray(conn net.Conn) {
+	if conn == nil {
+		return
+	}
 	conn.Write([]byte("*-1\r\n"))
 }
 
