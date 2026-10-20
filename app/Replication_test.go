@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"io"
+	"net"
 	"strconv"
 	"strings"
 	"sync"
@@ -122,4 +124,91 @@ func TestOffsetReadsAreSafeDuringPropagation(t *testing.T) {
 	wg.Wait()
 
 	assertEqual(t, s.replicationOffset(), 200*len(encode("SET", "k", "v")))
+}
+
+// ---- connecting to the master ----
+
+// fakeMaster accepts one replica and answers each command it sends with the next scripted reply.
+// After the script runs out it sends `after` (e.g. propagated writes) and hangs up.
+func fakeMaster(t *testing.T, replies []string, after string) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		reader := bufio.NewReader(conn)
+		for _, reply := range replies {
+			if _, err := parseRESP(reader); err != nil {
+				return
+			}
+			conn.Write([]byte(reply))
+		}
+		conn.Write([]byte(after))
+		// hang up cleanly: the replica reads EOF, and we drain whatever it still sends until it closes
+		conn.(*net.TCPConn).CloseWrite()
+		io.Copy(io.Discard, reader)
+	}()
+	return ln.Addr().String()
+}
+
+func newTestReplica(masterAddr string) *Server {
+	s := newTestServer()
+	s.isMaster = false
+	s.port = "6380"
+	s.replicaOf = masterAddr
+	return s
+}
+
+func assertErrorContains(t *testing.T, err error, want string) {
+	t.Helper()
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Errorf("error = %v, want it to contain %q", err, want)
+	}
+}
+
+func TestConnectToMasterSyncsAndAppliesWrites(t *testing.T) {
+	addr := fakeMaster(t,
+		[]string{"+PONG\r\n", "+OK\r\n", "+OK\r\n", "+FULLRESYNC abc 0\r\n$3\r\nRDB"},
+		encode("SET", "k", "v"))
+	s := newTestReplica(addr)
+
+	// returns once the fake master hangs up after sending the SET
+	if err := s.connectToMaster(); err != nil {
+		t.Fatalf("connectToMaster: %v", err)
+	}
+	assertEqual(t, call(s.Get, "k"), "$1\r\nv\r\n")
+}
+
+func TestConnectToMasterReportsUnreachableMaster(t *testing.T) {
+	ln, _ := net.Listen("tcp", "127.0.0.1:0")
+	addr := ln.Addr().String()
+	ln.Close() // nothing is listening here any more
+
+	assertErrorContains(t, newTestReplica(addr).connectToMaster(), "connection refused")
+}
+
+func TestConnectToMasterReportsHandshakeFailures(t *testing.T) {
+	tests := []struct {
+		name    string
+		replies []string
+		want    string
+	}{
+		{"PING rejected", []string{"-ERR nope\r\n"}, `got "-ERR nope\r\n"`},
+		{"master hangs up after PING", []string{}, "stage 1 (PING) failed: EOF"},
+		{"master hangs up after REPLCONF port", []string{"+PONG\r\n"}, "stage 2 (REPLCONF listening-port) failed: EOF"},
+		{"master hangs up after REPLCONF capa", []string{"+PONG\r\n", "+OK\r\n"}, "stage 3 (REPLCONF capa) failed: EOF"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newTestReplica(fakeMaster(t, tt.replies, ""))
+			assertErrorContains(t, s.connectToMaster(), tt.want)
+		})
+	}
 }

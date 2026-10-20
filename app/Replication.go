@@ -33,11 +33,21 @@ func (s *Server) replicationOffset() int {
 
 // function to count how many replica have acknowledge the write they recieved 
 
+// connectToMaster performs the replication handshake, then applies the master's
+// writes until the connection drops.
+//
+// TODO: retry instead of giving up when the master is unreachable or the link drops:
+//   - exponential backoff with a cap, plus random jitter so many replicas don't
+//     reconnect in lockstep after a master restart (thundering herd / back pressure)
+//   - only worth doing once FULLRESYNC sends a real snapshot: the master always
+//     sends an empty RDB today, so a reconnecting replica would silently miss every
+//     write made while it was disconnected
 func (s *Server) connectToMaster() error {
 	conn, err := net.Dial("tcp", s.replicaOf)
 	if err != nil {
 		return fmt.Errorf("Replica failed to connect to Master: %w", err)
 	}
+	defer conn.Close()
 	// PING
 	writeArray(conn, []string{"PING"})
 
@@ -45,7 +55,7 @@ func (s *Server) connectToMaster() error {
 	reader := bufio.NewReader(conn)
 	response, err := reader.ReadString('\n')
 	if err != nil {
-		return fmt.Errorf("stage 1 of Handshake failed")
+		return fmt.Errorf("handshake stage 1 (PING) failed: %w", err)
 	}
 
 	if response != "+PONG\r\n" {
@@ -56,7 +66,7 @@ func (s *Server) connectToMaster() error {
 	writeArray(conn, []string{"REPLCONF", "listening-port", s.port})
 	response, err = reader.ReadString('\n')
 	if err != nil {
-		return fmt.Errorf("stage 2 of Handshake failed")
+		return fmt.Errorf("handshake stage 2 (REPLCONF listening-port) failed: %w", err)
 	}
 
 	if response != "+OK\r\n" {
@@ -66,7 +76,7 @@ func (s *Server) connectToMaster() error {
 	writeArray(conn, []string{"REPLCONF", "capa", "psync2"})
 	response, err = reader.ReadString('\n')
 	if err != nil {
-		return fmt.Errorf("stage 2 of Handshake failed")
+		return fmt.Errorf("handshake stage 3 (REPLCONF capa) failed: %w", err)
 	}
 
 	if response != "+OK\r\n" {

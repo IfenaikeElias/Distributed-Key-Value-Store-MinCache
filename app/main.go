@@ -34,8 +34,12 @@ func main() {
 		s.master_replid = GenerateReplicationID()
 	}
 	if !s.isMaster {
-		// connect to master and start syncing
-		go s.connectToMaster()
+		// connect to master and start syncing; this replica keeps serving reads either way
+		go func() {
+			if err := s.connectToMaster(); err != nil {
+				fmt.Println("Replication stopped:", err)
+			}
+		}()
 	}
 	s.ListenForConn()
 
