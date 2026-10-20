@@ -48,6 +48,9 @@ func handleExec(s *Server, conn net.Conn, args []string, inTransaction *bool, tr
 		if s.isMaster && isWriteCommand(command.name) {
 			s.propagateToReplicas(append([]string{command.name}, command.arguements...))
 		}
+		if command.name == "RPUSH" || command.name == "LPUSH" {
+			s.serveBlockedClients(command.arguements[0])
+		}
 	}
 	*transactionQueue = []function{}
 }

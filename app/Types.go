@@ -22,6 +22,8 @@ type value struct {
 type Store struct {
 	mutexLock sync.RWMutex
 	KVStore   map[string]value
+	// clients blocked in BLPOP, per key, longest-waiting first (guarded by mutexLock)
+	waiters map[string][]chan string
 }
 
 type function struct {
@@ -49,7 +51,12 @@ type Server struct {
 	master_replid 	 	string
 }
 
-// intialize store
-var store = &Store{
-	KVStore: make(map[string]value),
+func newStore() *Store {
+	return &Store{
+		KVStore: make(map[string]value),
+		waiters: make(map[string][]chan string),
+	}
 }
+
+// intialize store
+var store = newStore()

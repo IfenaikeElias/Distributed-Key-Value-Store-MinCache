@@ -67,3 +67,32 @@ func TestFailedWritesInExecAreNotPropagated(t *testing.T) {
 
 	assertEqual(t, replica.String(), encode("SET", "s", "abc")+encode("INCR", "n"))
 }
+
+// ---- BLPOP woken by a push: replicas must get the push before the pop ----
+
+func TestBlpopServedByPushIsPropagatedAfterThePush(t *testing.T) {
+	s := newTestServer()
+	replica := attachReplica(s)
+	waiter := blpopInBackground(s, "k", "0")
+	waitForWaiters(t, s, "k", 1)
+	c := connect(t, s)
+
+	assertEqual(t, c.do("RPUSH", "k", "a", "b"), ":2\r\n")
+	c.do("PING") // the loop has finished serving and propagating the RPUSH
+
+	assertEqual(t, receive(t, waiter), "*2\r\n$1\r\nk\r\n$1\r\na\r\n")
+	assertEqual(t, replica.String(), encode("RPUSH", "k", "a", "b")+encode("LPOP", "k"))
+}
+
+func TestBlpopIsWokenByPushInsideExec(t *testing.T) {
+	s := newTestServer()
+	waiter := blpopInBackground(s, "k", "0")
+	waitForWaiters(t, s, "k", 1)
+	c := connect(t, s)
+
+	c.do("MULTI")
+	c.do("RPUSH", "k", "a")
+	c.do("EXEC")
+
+	assertEqual(t, receive(t, waiter), "*2\r\n$1\r\nk\r\n$1\r\na\r\n")
+}

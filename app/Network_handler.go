@@ -107,5 +107,9 @@ func handleConnection(conn net.Conn, Commands map[string]CommandHandler, s *Serv
 		if s.isMaster && isWriteCommand(cmd) {
 			s.propagateToReplicas(append([]string{cmd}, args[1:]...))
 		}
+		// wake BLPOP clients only after the push itself has been propagated
+		if cmd == "RPUSH" || cmd == "LPUSH" {
+			s.serveBlockedClients(args[1])
+		}
 	}
 }

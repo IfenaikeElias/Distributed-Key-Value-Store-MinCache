@@ -45,3 +45,13 @@ func TestReplicaSendsNoRepliesForPropagatedWrites(t *testing.T) {
 
 	assertEqual(t, masterConn.String(), "")
 }
+
+func TestReplicaAppliesPropagatedLpop(t *testing.T) {
+	s := newTestServer()
+	s.isMaster = false
+
+	// what the master sends when a BLPOP client is served by a push
+	feedFromMaster(s, []string{"RPUSH", "k", "a", "b"}, []string{"LPOP", "k"})
+
+	assertEqual(t, call(s.Lrange, "k", "0", "-1"), "*1\r\n$1\r\nb\r\n")
+}

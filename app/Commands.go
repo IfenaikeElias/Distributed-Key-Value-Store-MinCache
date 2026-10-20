@@ -315,89 +315,106 @@ func (s *Server) Lpop(conn net.Conn, args ...string) error {
 
 func (s *Server) Blpop(conn net.Conn, args ...string) error {
 	if len(args) != 2 {
-		if conn != nil {
-			writeErr(conn, "BLPOP: command expects two arguements: list_key timeout")
-		}
-		return nil
+		writeErr(conn, "BLPOP: command expects two arguements: list_key timeout")
+		return fmt.Errorf("BLPOP: expected 2 arguements, got %d", len(args))
 	}
 	key := args[0]
 	timeoutValue, err := strconv.ParseFloat(args[1], 64)
 	if err != nil || timeoutValue < 0 {
-		if conn != nil {
-			writeErr(conn, "BLPOP: timeout must be a positive number")
-		}
-		return nil
+		writeErr(conn, "BLPOP: timeout must be a positive number")
+		return fmt.Errorf("BLPOP: invalid timeout %q", args[1])
 	}
 
-	var deadline time.Time
-	indefinite := timeoutValue == 0
-	if !indefinite {
-		deadline = time.Now().Add(time.Duration(timeoutValue * float64(time.Second)))
-	}
-
-	if !indefinite {
-		for time.Now().Before(deadline) {
-			s.DB.mutexLock.Lock()
-			entity, ok := s.DB.KVStore[key]
-			if !ok {
-				s.DB.mutexLock.Unlock()
-				continue
-			} else if !entity.isListValue {
-				s.DB.mutexLock.Unlock()
-				if conn != nil {
-					writeErr(conn, "BLPOP: command got a non list_key arguement")
-				}
-				return nil
-			}
-			if len(entity.listVal) > 0 {
-				popped := entity.listVal[0]
-				entity.listVal = entity.listVal[1:]
-				s.DB.saveList(key, entity)
-				s.DB.mutexLock.Unlock()
-				if conn != nil {
-					writeArray(conn, []string{key, popped})
-				}
-				if s.isMaster {
-					s.propagateToReplicas([]string{"LPOP", key})
-				}
-				return nil
-			}
-			s.DB.mutexLock.Unlock()
-		}
-		if conn != nil {
-			writeNullArray(conn)
-		}
-		return nil
-	}
-
-	// indefinite
-	for {
-		s.DB.mutexLock.Lock()
-		entity, ok := s.DB.KVStore[key]
-		if !ok {
-			s.DB.mutexLock.Unlock()
-			continue
-		} else if !entity.isListValue {
-			s.DB.mutexLock.Unlock()
-			if conn != nil {
-				writeErr(conn, "BLPOP: command got a non list_key arguement")
-			}
-			return nil
-		}
-		if len(entity.listVal) > 0 {
-			popped := entity.listVal[0]
-			entity.listVal = entity.listVal[1:]
-			s.DB.saveList(key, entity)
-			s.DB.mutexLock.Unlock()
-			if conn != nil {
-				writeArray(conn, []string{key, popped})
-			}
-			if s.isMaster {
-				s.propagateToReplicas([]string{"LPOP", key})
-			}
-			return nil
-		}
+	s.DB.mutexLock.Lock()
+	entity, ok := s.DB.KVStore[key]
+	if ok && !entity.isListValue {
 		s.DB.mutexLock.Unlock()
+		writeErr(conn, "BLPOP: command got a non list_key arguement")
+		return fmt.Errorf("BLPOP: key %s is not a list", key)
+	}
+	// fast path: list already has elements, behave like LPOP
+	if ok && len(entity.listVal) > 0 {
+		popped := entity.listVal[0]
+		entity.listVal = entity.listVal[1:]
+		s.DB.saveList(key, entity)
+		s.DB.mutexLock.Unlock()
+		writeArray(conn, []string{key, popped})
+		if s.isMaster {
+			s.propagateToReplicas([]string{"LPOP", key})
+		}
+		return nil
+	}
+	// slow path: join the queue for this key and sleep until a push hands us an element.
+	// buffered so the pusher never blocks on the send
+	ch := make(chan string, 1)
+	s.DB.waiters[key] = append(s.DB.waiters[key], ch)
+	s.DB.mutexLock.Unlock()
+
+	// a nil channel never fires, so timeout 0 blocks forever
+	var timeout <-chan time.Time
+	if timeoutValue > 0 {
+		timer := time.NewTimer(time.Duration(timeoutValue * float64(time.Second)))
+		defer timer.Stop()
+		timeout = timer.C
+	}
+
+	select {
+	case popped := <-ch:
+		writeArray(conn, []string{key, popped})
+	case <-timeout:
+		s.DB.mutexLock.Lock()
+		stillWaiting := s.DB.removeWaiter(key, ch)
+		s.DB.mutexLock.Unlock()
+		if stillWaiting {
+			writeNullArray(conn)
+			return nil
+		}
+		// a push handed us an element right as we timed out; it's already in ch, don't lose it
+		writeArray(conn, []string{key, <-ch})
+	}
+	return nil
+}
+
+// removeWaiter drops ch from key's BLPOP queue and reports whether it was still queued.
+// Caller must hold s.mutexLock.
+func (s *Store) removeWaiter(key string, ch chan string) bool {
+	queue := s.waiters[key]
+	i := slices.Index(queue, ch)
+	if i < 0 {
+		return false
+	}
+	queue = slices.Delete(queue, i, i+1)
+	if len(queue) == 0 {
+		delete(s.waiters, key)
+	} else {
+		s.waiters[key] = queue
+	}
+	return true
+}
+
+// serveBlockedClients hands elements of key's list to clients blocked in BLPOP,
+// longest-waiting first. Called after a push has been applied and propagated,
+// so replicas receive the push before the LPOPs it feeds.
+func (s *Server) serveBlockedClients(key string) {
+	s.DB.mutexLock.Lock()
+	entity, ok := s.DB.KVStore[key]
+	served := 0
+	for ok && entity.isListValue && len(entity.listVal) > 0 && len(s.DB.waiters[key]) > 0 {
+		ch := s.DB.waiters[key][0]
+		s.DB.removeWaiter(key, ch)
+		ch <- entity.listVal[0]
+		entity.listVal = entity.listVal[1:]
+		served++
+	}
+	if served > 0 {
+		s.DB.saveList(key, entity)
+	}
+	s.DB.mutexLock.Unlock()
+
+	if s.isMaster {
+		for range served {
+			s.propagateToReplicas([]string{"LPOP", key})
+		}
 	}
 }
 

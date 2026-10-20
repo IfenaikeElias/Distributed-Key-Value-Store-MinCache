@@ -35,7 +35,7 @@ func (c *fakeConn) String() string {
 func newTestServer() *Server {
 	return &Server{
 		isMaster: true,
-		DB:       &Store{KVStore: make(map[string]value)},
+		DB:       newStore(),
 	}
 }
 
@@ -130,4 +130,39 @@ func replOffset(s *Server) int {
 	s.replicasMu.RLock()
 	defer s.replicasMu.RUnlock()
 	return s.master_repl_offset
+}
+
+// blpopInBackground starts a BLPOP on its own goroutine; its reply arrives on the returned channel.
+func blpopInBackground(s *Server, key, timeout string) <-chan string {
+	reply := make(chan string, 1)
+	go func() { reply <- call(s.Blpop, key, timeout) }()
+	return reply
+}
+
+// waitForWaiters blocks until exactly n clients are queued in BLPOP on key.
+func waitForWaiters(t *testing.T, s *Server, key string, n int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		s.DB.mutexLock.RLock()
+		queued := len(s.DB.waiters[key])
+		s.DB.mutexLock.RUnlock()
+		if queued == n {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %d BLPOP clients on %q", n, key)
+}
+
+// receive waits for a background reply, failing instead of hanging if it never comes.
+func receive(t *testing.T, reply <-chan string) string {
+	t.Helper()
+	select {
+	case r := <-reply:
+		return r
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for reply")
+		return ""
+	}
 }

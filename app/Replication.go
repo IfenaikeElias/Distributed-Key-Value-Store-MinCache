@@ -113,6 +113,8 @@ func (s *Server) listenToMaster(reader *bufio.Reader, conn net.Conn) {
             s.Lpush(nil, args[1:]...)
         case "INCR":
             s.Incr(nil, args[1:]...)
+        case "LPOP":
+            s.Lpop(nil, args[1:]...)
         case "REPLCONF":
             if len(args) > 1 && strings.ToUpper(args[1]) == "GETACK" {
 				writeArray(conn, []string{"REPLCONF", "ACK", strconv.Itoa(s.replOffset)})
