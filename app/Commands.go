@@ -467,7 +467,7 @@ func (s *Server) Info(conn net.Conn, args ...string) error {
 		info.WriteString("role:slave\r\n")
 	}
 	info.WriteString(fmt.Sprintf("master_replid:%s\r\n", s.master_replid))
-	info.WriteString(fmt.Sprintf("master_repl_offset:%d\r\n", s.master_repl_offset))
+	info.WriteString(fmt.Sprintf("master_repl_offset:%d\r\n", s.replicationOffset()))
 	writeBulkStr(conn, false, info.String())
 	return nil
 }
@@ -490,7 +490,7 @@ func (s *Server) Wait(conn net.Conn, args ...string) error {
 		return nil
 	}
 
-	targetOffSet := s.master_repl_offset
+	targetOffSet := s.replicationOffset()
 
 	// check if already caught up before asking
 	s.replicasMu.RLock()

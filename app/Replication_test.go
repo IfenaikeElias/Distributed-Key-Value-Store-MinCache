@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -100,4 +101,25 @@ func TestReplicaAnswersGetackWithBytesProcessedSoFar(t *testing.T) {
 	// the offset in the ACK counts everything before the GETACK itself
 	offset := strconv.Itoa(len(encode("SET", "k", "v")))
 	assertEqual(t, masterConn.String(), encode("REPLCONF", "ACK", offset))
+}
+
+// ---- master_repl_offset must only be read under replicasMu (run with -race) ----
+
+func TestOffsetReadsAreSafeDuringPropagation(t *testing.T) {
+	s := newTestServer()
+	attachReplica(s)
+
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for range 200 {
+			s.propagateToReplicas([]string{"SET", "k", "v"})
+		}
+	})
+	for range 200 {
+		call(s.Info)
+		call(s.Wait, "0", "0")
+	}
+	wg.Wait()
+
+	assertEqual(t, s.replicationOffset(), 200*len(encode("SET", "k", "v")))
 }

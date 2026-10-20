@@ -54,7 +54,7 @@ func handleConnection(conn net.Conn, Commands map[string]CommandHandler, s *Serv
 
 		// Respond to "PSYNC from handshake"
 		if cmd == "PSYNC" {
-			writeStr(conn, fmt.Sprintf("FULLRESYNC %s %d", s.master_replid, s.master_repl_offset))
+			writeStr(conn, fmt.Sprintf("FULLRESYNC %s %d", s.master_replid, s.replicationOffset()))
 			emptyRDB, _ := hex.DecodeString("524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2")
 			writeRDBFile(conn, string(emptyRDB))
 

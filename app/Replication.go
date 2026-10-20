@@ -23,6 +23,14 @@ func (s *Server) propagateToReplicas(args []string) {
 	s.replicasMu.Unlock()
 }
 
+// replicationOffset reads master_repl_offset under replicasMu, the lock
+// propagateToReplicas holds while advancing it.
+func (s *Server) replicationOffset() int {
+	s.replicasMu.RLock()
+	defer s.replicasMu.RUnlock()
+	return s.master_repl_offset
+}
+
 // function to count how many replica have acknowledge the write they recieved 
 
 func (s *Server) connectToMaster() error {

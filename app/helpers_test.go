@@ -125,13 +125,6 @@ func attachReplica(s *Server) *fakeConn {
 	return replica
 }
 
-// replOffset reads the master's replication offset under its lock.
-func replOffset(s *Server) int {
-	s.replicasMu.RLock()
-	defer s.replicasMu.RUnlock()
-	return s.master_repl_offset
-}
-
 // blpopInBackground starts a BLPOP on its own goroutine; its reply arrives on the returned channel.
 func blpopInBackground(s *Server, key, timeout string) <-chan string {
 	reply := make(chan string, 1)

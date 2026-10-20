@@ -53,7 +53,7 @@ func TestFailedWritesAreNotPropagated(t *testing.T) {
 	c.do("PING") // replies come before propagation; once PING answers, INCR n has been propagated
 
 	assertEqual(t, replica.String(), encode("SET", "s", "abc")+encode("RPUSH", "l", "a")+encode("INCR", "n"))
-	assertEqual(t, replOffset(s), len(replica.String()))
+	assertEqual(t, s.replicationOffset(), len(replica.String()))
 }
 
 func TestFailedWritesInExecAreNotPropagated(t *testing.T) {
